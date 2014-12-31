@@ -4,7 +4,7 @@ import re
 import time
 
 # http://docs.fabfile.org/en/latest/api/core/operations.html
-from fabric.api import abort, env
+from fabric.api import abort, env, put, sudo
 from fabric.decorators import runs_once, task
 
 env.ec2_key_pair_name = 'exabytes18@geneva'
@@ -139,3 +139,96 @@ def launch(name):
         bid=config['bid'],
         instance_type=config['type'],
         security_groups=config['security_groups'])
+
+
+@task
+@runs_once
+def register_image(snapshot):
+    ec2 = boto.ec2.connect_to_region(env.ec2_region)
+    ec2.register_image(
+        name='Centos 7.0',
+        description='Centos 7.0',
+        architecture='x86_64',
+        virtualization_type='hvm',
+        root_device_name='/dev/sda1',
+        snapshot_id=snapshot,
+        delete_root_volume_on_termination=True)
+
+
+@task
+def build_image():
+    # prepare the volume
+    sudo('! mountpoint -q /mnt/ami || umount /mnt/ami')
+    sudo('parted -a optimal /dev/xvdb -s mklabel gpt mkpart primary 2048s 6144s mkpart primary 8192s 100% set 1 bios_grub on')
+    sudo('mkfs.xfs -f /dev/xvdb2')
+    sudo('mkdir -p /mnt/ami')
+    sudo('grep -qi "/dev/xvdb2" /etc/fstab || echo "/dev/xvdb2 /mnt/ami xfs defaults 0 0" >> /etc/fstab')
+    sudo('mount /mnt/ami')
+
+    # bind /dev and /proc from buildbox
+    sudo('mountpoint -q /mnt/ami/dev || mkdir -p /mnt/ami/dev && mount -o bind /dev /mnt/ami/dev')
+    sudo('mountpoint -q /mnt/ami/proc || mkdir -p /mnt/ami/proc && mount -o bind /proc /mnt/ami/proc')
+
+    # install the base packages and any thing else that we want in our ami
+    put('files/yum.conf', '/tmp/yum.conf')
+    sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y groupinstall Base')
+    sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y install dhclient e2fsprogs selinux-policy selinux-policy-targeted openssh openssh-server openssh-clients vim bzip2 sudo ntp gcc autoconf automake make libtool grub2')
+    sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y remove plymouth plymouth-core-libs plymouth-scripts')
+
+    # install bootloader
+    sudo('''cat <<EOF > /mnt/ami/etc/default/grub
+GRUB_TIMEOUT=1
+GRUB_DISTRIBUTOR="$(sed 's, release .*$,,g' /etc/system-release)"
+GRUB_DEFAULT=saved
+GRUB_DISABLE_SUBMENU=true
+GRUB_TERMINAL="serial console"
+GRUB_SERIAL_COMMAND="serial --speed=115200"
+GRUB_CMDLINE_LINUX="console=ttyS0,115200 console=tty0 vconsole.font=latarcyrheb-sun16 crashkernel=auto  vconsole.keymap=us"
+GRUB_DISABLE_RECOVERY="true"
+EOF''')
+    sudo('grub2-install --boot-directory=/mnt/ami/boot /dev/xvdb')
+    sudo('chroot /mnt/ami grub2-mkconfig -o /boot/grub2/grub.cfg')
+
+    # setup fstab
+    sudo('''UUID=`blkid -o value -s UUID /dev/xvdb2`; cat <<EOF > /mnt/ami/etc/fstab
+UUID=$UUID    /               xfs             defaults        1    1
+none            /dev/pts        devpts          gid=5,mode=620  0    0
+none            /dev/shm        tmpfs           defaults        0    0
+none            /proc           proc            defaults        0    0
+none            /sys            sysfs           defaults        0    0
+EOF''')
+
+    # setup eth0
+    sudo('''cat <<EOF > /mnt/ami/etc/sysconfig/network-scripts/ifcfg-eth0
+DEVICE="eth0"
+BOOTPROTO="dhcp"
+ONBOOT="yes"
+TYPE="Ethernet"
+USERCTL="yes"
+PEERDNS="yes"
+IPV6INIT="no"
+PERSISTENT_DHCLIENT="1"
+EOF''')
+
+    # enable networking
+    sudo('''cat <<EOF > /mnt/ami/etc/sysconfig/network
+NETWORKING=yes
+NOZEROCONF=yes
+EOF''')
+
+    # no more touching the image after we relabel
+    sudo('chroot /mnt/ami /sbin/fixfiles -f -F relabel || true')
+
+    # freeze the volume so we get a clean snapshot
+    sudo('sync')
+    sudo('udevadm settle')
+    sudo('xfs_freeze -f /mnt/ami')
+
+    # snapshot
+
+    # unfreeze
+    sudo('xfs_freeze -u /mnt/ami')
+
+    # cleanup
+    sudo('umount /mnt/ami/dev')
+    sudo('umount /mnt/ami/proc')

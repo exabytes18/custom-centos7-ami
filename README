@@ -15,30 +15,72 @@ Setup AWS credentials needed for EC2 access:
         aws_secret_access_key = YOURSECRETKEY
 
 
-
-Guide for creating an EBS-backed HVM AMI. Go three-letter acronyms!
-
 Random notes:
-- there are two types of instances: paravirtual and HVM. paravirtual instances are essentially an os within an os with custom drivers so the inner os can talk directly to the outer os with minimal overhead (for things like network or disk io). This requires both inner and outer kernels to be patched so they can collude. HVM (hardware-assisted virtual machine) instances are also an os within an os, but the isolation is primarily handled in hardware (by the CPU) so that the inner os does not necessarily require patching. There are pros and cons to both approaches, but recent instances show that HVM performance is generally on-par with paravirtualized instances (which were previously considered faster). Also, several new instance types are HVM-only (e.g., the t2.* as of this writing). See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/virtualization_types.html for details.
-- enhanced networking (sriov) is only available for HVM instances (also need to run in a VPC, but that's a separate issue).
-- there are two types of AMIs: instance-backed AMIs and ebs-backed AMIs.
-- instance-backed AMIs are essentially a disk snapshot stored in S3. You must specify a kernel and ramdisk image (aki and ari, respectively) when launching an instance-backed AMI. When provisioning such an instance, EC2 copies the disk snapshot from S3 to host's instance storage (local disk). The host then executes the kernel (specified when launching the ami; kernel located outside of the disk snapshot). This tightly couples the disk image to an AKI. To make this more flexible, amazon(?) created a pv_grub AKI which is essentially a mini os masquerading as a kernel that boots the AMI as if the disk snapshot was just an ordinary disk drive. Of course, the kernel backed into the disk snapshot must still be compatible with xen.
-- ebs-backed AMIs are similar to instance-backed AMIs except the raw bits are stored as an EBS snapshot. EBS is essentially network attached storage which exposes raw block devices
-- ebs is historically slow and unreliable, but amazon seems to have dedicated a lot of engineering effort to improving this. New features include general-purposes SSD-backed volumes and provisioned IOPS. Certains instances can now also be launched as EBS-optimized giving it a more SAN-like quality.
-- ebs general-purposes volumes have baseline performance of 3 IOPS * (size of volume in gb). For small instances, this is actually pretty low, but probably fine for boot volumes.
-- When it works, ebs is more flexible (supports more instance types, ability to snapshot volumes, lets you use all instance-storage for your application).
-- ebs snapshots work via copy-on-write + refcounting (conceptually, anyway)... when you delete a snapshot, you only delete blocks that are no longer referenced by any other snapshots
-- need to run grub2-install with the correct boot-directory. missing i386-pc is critically bad.
-- selinux will deny critical components such as the login service.. need to relabel (preferably during build process, not via .autorelabel).
+  - there are two types of instances: paravirtual and HVM. paravirtual
+    instances are essentially an os within an os with custom drivers so the
+    inner os can talk directly to the outer os with minimal overhead (for
+    things like network or disk io). This requires both inner and outer kernels
+    to be patched so they can collude. HVM (hardware-assisted virtual machine)
+    instances are also an os within an os, but the isolation is primarily
+    handled in hardware (by the CPU) so that the inner os does not necessarily
+    require patching. There are pros and cons to both approaches, but recent
+    instances show that HVM performance is generally on-par with
+    paravirtualized instances (which were previously considered faster). Also,
+    several new instance types are HVM-only (e.g., the t2.* as of this
+    writing). See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/virtualization_types.html for details.
+  - enhanced networking (sriov) is only available for HVM instances (also need
+    to run in a VPC, but that's a separate issue).
+  - there are two types of AMIs: instance-backed AMIs and ebs-backed AMIs.
+  - instance-backed AMIs are essentially a disk snapshot stored in S3. You must
+    specify a kernel and ramdisk image (aki and ari, respectively) when
+    launching an instance-backed AMI. When provisioning such an instance, EC2
+    copies the disk snapshot from S3 to host's instance storage (local disk).
+    The host then executes the kernel (specified when launching the ami; kernel
+    located outside of the disk snapshot). This tightly couples the disk image
+    to an AKI. To make this more flexible, amazon(?) created a pv_grub AKI
+    which is essentially a mini os masquerading as a kernel that boots the AMI
+    as if the disk snapshot was just an ordinary disk drive. Of course, the
+    kernel backed into the disk snapshot must still be compatible with xen.
+  - ebs-backed AMIs are similar to instance-backed AMIs except the raw bits are
+    stored as an EBS snapshot. EBS is essentially network attached storage
+    which exposes raw block devices
+  - ebs is historically slow and unreliable, but amazon seems to have dedicated
+    a lot of engineering effort to improving this. New features include
+    general-purposes SSD-backed volumes and provisioned IOPS. Certains
+    instances can now also be launched as EBS-optimized giving it a more
+    SAN-like quality.
+  - ebs general-purposes volumes have baseline performance of 3 IOPS * (size of
+    volume in gb). For small instances, this is actually pretty low, but
+    probably fine for boot volumes.
+  - When it works, ebs is more flexible (supports more instance types, ability
+    to snapshot volumes, lets you use all instance-storage for your
+    application).
+  - ebs snapshots work via copy-on-write + refcounting (conceptually,
+    anyway)... when you delete a snapshot, you only delete blocks that are no
+    longer referenced by any other snapshots
+  - need to run grub2-install with the correct boot-directory. missing i386-pc
+    is critically bad.
+  - selinux will deny critical components such as the login service.. need to
+    relabel (preferably during build process, not via .autorelabel).
 
 
+Summary (guide to building ebs-backed hvm centos7 ami):
+  1.) create a temporary build box (i used an official centos7 to minimize risk
+      of weirdness: https://aws.amazon.com/marketplace/pp/B00O7WM7QW, but I
+      think even centos6 or redhat images would work here)
+  2.) mount a separate ebs volume to the build box (either launch an
+      instance-backed VM and add an ebs volume or launch an ebs-backed vm and
+      add a separate volume); this volume is the blank canvas for our custom
+      ami.
+  3.) partition and mount the volume to the build box.
+  4.) copy files or install any packages you wish to the volume
+  5.) freeze the volume (xfs has xfs_freeze!)
+  6.) using ec2 api, snapshot the volume
+  7.) unfreeze the volume
+  8.) using ec2 api, create an ami from the snapshot created in step 6.
 
-summary:
-1.) create a temporary build box (i used an official centos7 to minimize risk of weirdness: https://aws.amazon.com/marketplace/pp/B00O7WM7QW, but I think even centos6 or redhat images would work here)
-2.) mount a separate ebs volume to the build box (either launch an instance-backed VM and add an ebs volume or launch an ebs-backed vm and add a separate volume); this volume is the blank canvas for our custom ami.
-3.) partition and mount the volume to the build box.
-4.) copy files or install any packages you wish to the volume
-5.) freeze the volume (xfs has xfs_freeze!)
-6.) using ec2 api, snapshot the volume
-7.) unfreeze the volume
-8.) using ec2 api, create an ami from the snapshot created in step 6.
+
+Usage:
+    fab launch:buildbox
+    fab -H BUILDBOX_IP build_image
+    fab register_image:snap-030020b5
