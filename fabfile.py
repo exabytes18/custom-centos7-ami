@@ -145,7 +145,7 @@ def launch(name):
 @runs_once
 def register_image(snapshot):
     ec2 = boto.ec2.connect_to_region(env.ec2_region)
-    ec2.register_image(
+    ami = ec2.register_image(
         name='Centos 7.0',
         description='Centos 7.0',
         architecture='x86_64',
@@ -153,6 +153,7 @@ def register_image(snapshot):
         root_device_name='/dev/sda1',
         snapshot_id=snapshot,
         delete_root_volume_on_termination=True)
+    print "%s" % ami
 
 
 @task
@@ -172,7 +173,7 @@ def build_image():
     # install the base packages and any thing else that we want in our ami
     put('files/yum.conf', '/tmp/yum.conf')
     sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y groupinstall Base')
-    sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y install dhclient e2fsprogs selinux-policy selinux-policy-targeted openssh openssh-server openssh-clients vim bzip2 sudo ntp gcc autoconf automake make libtool grub2')
+    sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y install dhclient e2fsprogs selinux-policy selinux-policy-targeted openssh openssh-server openssh-clients vim bzip2 sudo ntp gcc autoconf automake make libtool grub2 cloud-init')
     sudo('yum -c /tmp/yum.conf --installroot=/mnt/ami -y remove plymouth plymouth-core-libs plymouth-scripts')
 
     # install bootloader
@@ -215,6 +216,13 @@ EOF''')
 NETWORKING=yes
 NOZEROCONF=yes
 EOF''')
+
+    # enable services
+    sudo('/usr/sbin/chroot /mnt/ami /bin/systemctl enable sshd')
+    sudo('/usr/sbin/chroot /mnt/ami /bin/systemctl enable cloud-init')
+    sudo('/usr/sbin/chroot /mnt/ami /bin/systemctl enable cloud-init-local')
+    sudo('/usr/sbin/chroot /mnt/ami /bin/systemctl enable cloud-config')
+    sudo('/usr/sbin/chroot /mnt/ami /bin/systemctl enable cloud-final')
 
     # no more touching the image after we relabel
     sudo('chroot /mnt/ami /sbin/fixfiles -f -F relabel || true')
